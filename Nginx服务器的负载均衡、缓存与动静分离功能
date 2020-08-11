@@ -1,0 +1,323 @@
+ Nginx 之五： Nginx服务器的负载均衡、缓存与动静分离功能
+
+一、负载均衡：
+
+通过反向代理客户端的请求到一个服务器群组，通过某种算法，将客户端的请求按照自定义的有规律的一种调度调度给后端服务器。
+
+Nginx的负载均衡使用upstream定义服务器组，后面跟着组名，组名后面是大括号包起来的服务器列表，每个服务器使用server开头，后面跟定义的服务器名字、服务器IP:Port、参数；
+
+1:upstream要写在Server块的外面，可以有多个，名称不同即可，如下:
+复制代码
+
+upstream webserver {
+        server  192.168.0.201;
+        server  192.168.0.202;
+}
+
+server {
+        server_name  hfnginx.chinacloudapp.cn;
+        #access_log  logs/host.access.log  main;
+        location / {   #首页负载之后端服务器
+            proxy_pass  http://webserver;  #通过upstrean定义的服务器组名调用后端服务器
+            proxy_set_header X-Real-IP $remote_addr;  #传递客户端的ip地址
+        }
+        location ~* ^/form {   #后端Web服务器要有此目录
+            proxy_pass  http://webserver;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+}    
+
+复制代码
+
+1.1:后端服务器要准备好首页和form目录
+
+1.2:访问首页测试：
+
+    
+
+1.3:访问form目录测试：
+
+  
+
+ 1.4：nginx支持的三种负载方式：
+
+round-robin：轮训调度，默认
+ip_hash：会话绑定
+least_conn：最少会话链接
+
+1.5：backup服务器：
+复制代码
+
+upstream webserver {
+        server  192.168.0.201 weight=1 max_fails=2  fail_timeout=2;
+        server  192.168.0.202 weight=1 max_fails=2  fail_timeout=2;
+        server 127.0.0.1:9008 backup; #调用backup服务器，可以是本机或其他服务器。
+}
+server {
+                listen 9008;
+                server_name localhost;
+                root html/error;
+                index index.html;
+}
+
+[root@hfnginx nginx]# cat html/error/index.html  #backup服务器的内容
+Error Page!
+
+复制代码
+
+测试：将服务器组内的其他服务器关闭，访问如下：
+
+1.6：实现动静分离：
+复制代码
+
+upstream web {
+    server  192.168.0.1 weight=1 max_fails=2  fail_timeout=2;
+    server  192.168.0.2 weight=1 max_fails=2  fail_timeout=2;
+} 
+
+upstream image  {
+    server  192.168.0.3 weight=1 max_fails=2  fail_timeout=2;
+    server  192.168.0.4 weight=1 max_fails=2  fail_timeout=2;
+} 
+
+upstream php {
+    server  192.168.0.5 weight=1 max_fails=2  fail_timeout=2;
+    server  192.168.0.6 weight=1 max_fails=2  fail_timeout=2;
+} 
+
+location  /{
+    root html/web;
+    index  index.php index.html;
+}
+
+location ~* \.php$ {
+    fastcgi_proxy  http://php;
+}
+
+location ~* "\.(.jpg|png|jpeg|gif)" {
+    proxy_pass http://image;
+}
+
+复制代码
+
+1.7:实现数据缓存：
+
+缓存是缓存nginx服务器接收请求过的数据，数据超时时间不能太长，因为数据可能会发生变化，但是nginx服务器内部的缓存的数据还没有更细，会导致客户端请求的数据不是最新数据的问题，数据缓存目录不能定义在server快内，要定义在http块中。
+复制代码
+
+[root@hfnginx nginx]# grep -v "#" conf/conf.d/hfnginx.conf    | grep -v "^$"
+upstream webserver {
+        server  192.168.0.201 weight=1 max_fails=2  fail_timeout=2;
+        server  192.168.0.202 weight=1 max_fails=2  fail_timeout=2;
+}
+server {
+                listen 9008;
+                server_name localhost;
+                root html/error;
+                index index.html;
+}
+
+proxy_cache_path  /nginx/cache/first levels=1:2  keys_zone=first:20m max_size=1g; #缓存目录不能定义在server块内，要定义在http块中
+
+#/nginx/cache/first定义缓存目录参数
+#evels=1:2  定义两层目录，第一层一个字符名称，第二个两个字符名称
+#keys_zone=first:20m 每个缓存都是一个共享内存空间。这就是用户定义共享内存空间地址的名称
+#max_size=1g 定义目录最大空间为1g，因为缓存空间越大搜索数据越慢，因此不宜太大。
+server {
+        server_name  hfnginx.chinacloudapp.cn;
+        location / {
+            add_header X_Via $server_addr;  #添加服务器地址到报文头部
+            add_header X-Cache $upstream_cache_status;  #添加缓存状态到报文头部
+            proxy_pass  http://webserver;
+            proxy_cache  first; #调用缓存
+            proxy_cache_valid 200 10m; #定义缓存失效时间，200是状态码，即缓存状态码是200请求成功的数据，10m是10分钟，即缓存的数据的超时时间10分钟，10分钟后即过期，不定义则缓存不生效            
+        }
+
+        location ~* ^/form {
+            proxy_cache  cache_one;
+            proxy_pass  http://webserver;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+}
+
+复制代码
+
+ 测试缓存：
+
+注：X_Via返回的响应客户端请求报文的服务器，将有Nginx构建报文响应客户端请求，所以显示的是Nginx服务器的IP地址，X-Cache标记是否缓存，HIT是缓存过的数据，MISS是没有缓存的数据。
+
+把缓存删除，重新访问，将返回没有缓存的数据：
+
+ 刷新后再次访问:
+
+1.8：另外常用的三种缓存：
+
+open_log_cache:日志缓存，降低磁盘IO
+open_file_cache:打开文件句柄缓存，将文件缓存至 Nginx管理的内存当中加速响应
+fastcgi_cache:缓存后端php服务器的内容，当时如果php内容发生更改则会导致客户端访问的页面不是最新的，因此要慎用。
+
+另外Nginx的limit限制也是基于内存共享来实现的
+
+ 
+ Nginx 之五： Nginx服务器的负载均衡、缓存与动静分离功能
+
+一、负载均衡：
+
+通过反向代理客户端的请求到一个服务器群组，通过某种算法，将客户端的请求按照自定义的有规律的一种调度调度给后端服务器。
+
+Nginx的负载均衡使用upstream定义服务器组，后面跟着组名，组名后面是大括号包起来的服务器列表，每个服务器使用server开头，后面跟定义的服务器名字、服务器IP:Port、参数；
+
+1:upstream要写在Server块的外面，可以有多个，名称不同即可，如下:
+复制代码
+
+upstream webserver {
+        server  192.168.0.201;
+        server  192.168.0.202;
+}
+
+server {
+        server_name  hfnginx.chinacloudapp.cn;
+        #access_log  logs/host.access.log  main;
+        location / {   #首页负载之后端服务器
+            proxy_pass  http://webserver;  #通过upstrean定义的服务器组名调用后端服务器
+            proxy_set_header X-Real-IP $remote_addr;  #传递客户端的ip地址
+        }
+        location ~* ^/form {   #后端Web服务器要有此目录
+            proxy_pass  http://webserver;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+}    
+
+复制代码
+
+1.1:后端服务器要准备好首页和form目录
+
+1.2:访问首页测试：
+
+    
+
+1.3:访问form目录测试：
+
+  
+
+ 1.4：nginx支持的三种负载方式：
+
+round-robin：轮训调度，默认
+ip_hash：会话绑定
+least_conn：最少会话链接
+
+1.5：backup服务器：
+复制代码
+
+upstream webserver {
+        server  192.168.0.201 weight=1 max_fails=2  fail_timeout=2;
+        server  192.168.0.202 weight=1 max_fails=2  fail_timeout=2;
+        server 127.0.0.1:9008 backup; #调用backup服务器，可以是本机或其他服务器。
+}
+server {
+                listen 9008;
+                server_name localhost;
+                root html/error;
+                index index.html;
+}
+
+[root@hfnginx nginx]# cat html/error/index.html  #backup服务器的内容
+Error Page!
+
+复制代码
+
+测试：将服务器组内的其他服务器关闭，访问如下：
+
+1.6：实现动静分离：
+复制代码
+
+upstream web {
+    server  192.168.0.1 weight=1 max_fails=2  fail_timeout=2;
+    server  192.168.0.2 weight=1 max_fails=2  fail_timeout=2;
+} 
+
+upstream image  {
+    server  192.168.0.3 weight=1 max_fails=2  fail_timeout=2;
+    server  192.168.0.4 weight=1 max_fails=2  fail_timeout=2;
+} 
+
+upstream php {
+    server  192.168.0.5 weight=1 max_fails=2  fail_timeout=2;
+    server  192.168.0.6 weight=1 max_fails=2  fail_timeout=2;
+} 
+
+location  /{
+    root html/web;
+    index  index.php index.html;
+}
+
+location ~* \.php$ {
+    fastcgi_proxy  http://php;
+}
+
+location ~* "\.(.jpg|png|jpeg|gif)" {
+    proxy_pass http://image;
+}
+
+复制代码
+
+1.7:实现数据缓存：
+
+缓存是缓存nginx服务器接收请求过的数据，数据超时时间不能太长，因为数据可能会发生变化，但是nginx服务器内部的缓存的数据还没有更细，会导致客户端请求的数据不是最新数据的问题，数据缓存目录不能定义在server快内，要定义在http块中。
+复制代码
+
+[root@hfnginx nginx]# grep -v "#" conf/conf.d/hfnginx.conf    | grep -v "^$"
+upstream webserver {
+        server  192.168.0.201 weight=1 max_fails=2  fail_timeout=2;
+        server  192.168.0.202 weight=1 max_fails=2  fail_timeout=2;
+}
+server {
+                listen 9008;
+                server_name localhost;
+                root html/error;
+                index index.html;
+}
+
+proxy_cache_path  /nginx/cache/first levels=1:2  keys_zone=first:20m max_size=1g; #缓存目录不能定义在server块内，要定义在http块中
+
+#/nginx/cache/first定义缓存目录参数
+#evels=1:2  定义两层目录，第一层一个字符名称，第二个两个字符名称
+#keys_zone=first:20m 每个缓存都是一个共享内存空间。这就是用户定义共享内存空间地址的名称
+#max_size=1g 定义目录最大空间为1g，因为缓存空间越大搜索数据越慢，因此不宜太大。
+server {
+        server_name  hfnginx.chinacloudapp.cn;
+        location / {
+            add_header X_Via $server_addr;  #添加服务器地址到报文头部
+            add_header X-Cache $upstream_cache_status;  #添加缓存状态到报文头部
+            proxy_pass  http://webserver;
+            proxy_cache  first; #调用缓存
+            proxy_cache_valid 200 10m; #定义缓存失效时间，200是状态码，即缓存状态码是200请求成功的数据，10m是10分钟，即缓存的数据的超时时间10分钟，10分钟后即过期，不定义则缓存不生效            
+        }
+
+        location ~* ^/form {
+            proxy_cache  cache_one;
+            proxy_pass  http://webserver;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+}
+
+复制代码
+
+ 测试缓存：
+
+注：X_Via返回的响应客户端请求报文的服务器，将有Nginx构建报文响应客户端请求，所以显示的是Nginx服务器的IP地址，X-Cache标记是否缓存，HIT是缓存过的数据，MISS是没有缓存的数据。
+
+把缓存删除，重新访问，将返回没有缓存的数据：
+
+ 刷新后再次访问:
+
+1.8：另外常用的三种缓存：
+
+open_log_cache:日志缓存，降低磁盘IO
+open_file_cache:打开文件句柄缓存，将文件缓存至 Nginx管理的内存当中加速响应
+fastcgi_cache:缓存后端php服务器的内容，当时如果php内容发生更改则会导致客户端访问的页面不是最新的，因此要慎用。
+
+另外Nginx的limit限制也是基于内存共享来实现的
+
+ 
+
